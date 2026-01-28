@@ -49,7 +49,7 @@ class SynEval:
 
     def evaluate_privacy(self) -> Dict:
         if self._privacy_evaluator is None:
-            self._privacy_evaluator = PrivacyEvaluator(self.synthetic_data, self.original_data, self.metadata)
+            self._privacy_evaluator = PrivacyEvaluator(self.synthetic_data, self.original_data, self.metadata, skip_heavy_models=True)
         return self._privacy_evaluator.evaluate()
 
 def parse_args():

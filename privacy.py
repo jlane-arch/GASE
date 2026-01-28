@@ -172,7 +172,7 @@ def ensure_tensor_device(tensor, device):
     return tensor
 
 class PrivacyEvaluator:
-    def __init__(self, synthetic_data: pd.DataFrame, original_data: pd.DataFrame, metadata: Dict):
+    def __init__(self, synthetic_data: pd.DataFrame, original_data: pd.DataFrame, metadata: Dict, skip_heavy_models: bool = False):
         """
         Initialize the privacy evaluator.
         
@@ -185,6 +185,7 @@ class PrivacyEvaluator:
         self.original_data = original_data
         self.metadata = metadata
         self.logger = logging.getLogger(__name__)
+        self.skip_heavy_models = skip_heavy_models
         
         # Initialize smart cache
         self.cache = SmartCache('./cache')
@@ -202,13 +203,16 @@ class PrivacyEvaluator:
             self.logger.info("Using CPU")
         
         # Initialize Flair NER model with caching
-        try:
-            self.logger.info("Loading Flair NER model (this may take a few minutes)...")
-            self.ner_tagger = get_flair_model()
-            self.logger.info("Loaded Flair NER model successfully")
-        except Exception as e:
-            self.logger.error(f"Failed to load Flair NER model: {str(e)}")
-            raise
+        if not self.skip_heavy_models:
+            try:
+                self.logger.info("Loading Flair NER model (this may take a few minutes)...")
+                self.ner_tagger = get_flair_model()
+                self.logger.info("Loaded Flair NER model successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to load Flair NER model: {str(e)}")
+                raise
+        else:
+            self.ner_tagger = None
         
         # Initialize spaCy for additional linguistic features
         try:
@@ -256,8 +260,9 @@ class PrivacyEvaluator:
         
         # Add data type specific evaluations
         if self._is_text_data():
-            self.logger.info("Running text-specific privacy evaluations...")
-            results.update(self._evaluate_text_privacy())
+            if not self.skip_heavy_models:
+                self.logger.info("Running text-specific privacy evaluations...")
+                results.update(self._evaluate_text_privacy())
         else:
             self.logger.info("Running tabular data privacy evaluations...")
             results.update(self._evaluate_tabular_privacy())
@@ -1302,3 +1307,325 @@ class PrivacyEvaluator:
                 embeddings.append(np.zeros(model.vector_size))
                 
         return np.array(embeddings)
+
+
+class SequentialTextEvaluator:
+    """
+    Optimized evaluator for the Main Process.
+    Loads models ONCE and reuses them for every generation.
+    """
+    def __init__(self, original_data: pd.DataFrame, metadata: Dict, text_column: str = None):
+        self.logger = logging.getLogger(__name__)
+        self.original_data = original_data
+        self.metadata = metadata
+        
+        # 1. Identify Text Column
+        if text_column:
+            self.text_col = text_column
+        else:
+            # Try to auto-detect from metadata
+            self.text_col = self._get_text_column()
+            
+        if not self.text_col:
+            raise ValueError("No text column found in metadata or arguments.")
+
+        self.original_texts = self.original_data[self.text_col].astype(str).tolist()
+        
+        # 2. Load Models (ONCE)
+        self.logger.info("SequentialEvaluator: Loading Models...")
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Flair
+        self.ner_tagger = SequenceTagger.load('flair/ner-english-fast').to(self.device)
+        
+        # SpaCy
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+        except:
+            spacy.cli.download("en_core_web_sm")
+            self.nlp = spacy.load("en_core_web_sm")
+            
+        # NLTK / Stopwords
+        self.stop_words = set(stopwords.words('english'))
+
+        # --- RESTORED EXACT FILTER LISTS ---
+        self.skip_words = {
+            'nan', 'none', 'null', 'n/a', 'na', 'no', 'yes', 'ok', 'okay',
+            'good', 'bad', 'great', 'nice', 'fine', 'well', 'ok', 'okay',
+            'five', 'stars', 'star', 'rating', 'review', 'reviews', 'product',
+            'item', 'items', 'price', 'quality', 'size', 'sizes', 'color',
+            'colors', 'shipping', 'delivery', 'order', 'orders', 'buy', 'bought',
+            'purchase', 'purchased', 'seller', 'sellers', 'buyer', 'buyers',
+            'customer', 'customers', 'thank', 'thanks', 'thank you', 'please',
+            'help', 'helpful', 'unhelpful', 'recommend', 'recommended'
+        }
+
+        self.nominal_patterns = {
+            'family': {
+                'mother', 'father', 'mom', 'dad', 'sister', 'brother', 'daughter', 'son',
+                'wife', 'husband', 'spouse', 'partner', 'grandmother', 'grandfather',
+                'aunt', 'uncle', 'cousin', 'niece', 'nephew', 'family', 'relative'
+            },
+            'role': {
+                'teacher', 'student', 'doctor', 'patient', 'customer', 'client',
+                'employee', 'employer', 'manager', 'director', 'officer', 'agent',
+                'representative', 'consultant', 'advisor', 'expert', 'specialist',
+                'professional', 'worker', 'staff', 'member', 'participant', 'user'
+            },
+            'relationship': {
+                'friend', 'colleague', 'neighbor', 'partner', 'associate', 'companion',
+                'acquaintance', 'contact', 'connection', 'ally', 'supporter', 'follower',
+                'leader', 'mentor', 'mentee', 'supervisor', 'subordinate', 'peer'
+            }
+        }
+        
+        # Flatten patterns for fast lookup
+        self.all_nominal_patterns = set().union(*self.nominal_patterns.values())
+        
+        # 3. Pre-Calculate Original Data Stats (ONCE)
+        # We do this now so we don't re-compute it for every individual in the population
+        self.logger.info("SequentialEvaluator: Pre-calculating Original Data Stats...")
+        self.orig_ner_stats = self._process_entities(self.original_texts, desc="Original NER")
+        self.orig_nominal_stats = self._process_nominals(self.original_texts, desc="Original Nominals")
+        self.orig_outlier_stats = self._calc_original_outliers()
+
+    def evaluate_synthetic(self, synthetic_data: pd.DataFrame) -> Dict:
+        """
+        Run all three analyses on a synthetic dataset and return the dictionary
+        structure matching PrivacyEvaluator.
+        """
+        syn_texts = synthetic_data[self.text_col].astype(str).tolist()
+        
+        return {
+            'named_entities': self._analyze_ner(syn_texts),
+            'nominal_mentions': self._analyze_nominals(syn_texts),
+            'stylistic_outliers': self._analyze_outliers(syn_texts)
+        }
+
+    # =========================================================================
+    # 1. Named Entity Recognition (NER)
+    # =========================================================================
+    def _analyze_ner(self, syn_texts: List[str]) -> Dict:
+        # Calculate Synthetic Stats
+        syn_stats = self._process_entities(syn_texts, desc="Syn NER")
+        
+        # Calculate Overlap
+        common = syn_stats['entities'].intersection(self.orig_ner_stats['entities'])
+        overlap_pct = (len(common) / len(self.orig_ner_stats['entities']) * 100) if self.orig_ner_stats['entities'] else 0
+        
+        return {
+            'synthetic': {
+                'total_entities': syn_stats['total_count'],
+                'avg_entity_density': syn_stats['density'],
+                'risk_level': 'high' if syn_stats['density'] > 0.1 else 'low'
+            },
+            'original': {
+                'total_entities': self.orig_ner_stats['total_count'],
+                'avg_entity_density': self.orig_ner_stats['density'],
+                'risk_level': 'high' if self.orig_ner_stats['density'] > 0.1 else 'low'
+            },
+            'overlap': {
+                'overlap_percentage': overlap_pct,
+                'risk_level': 'high' if overlap_pct > 50 else 'low'
+            }
+        }
+
+    def _process_entities(self, texts: List[str], desc="NER") -> Dict:
+        entities_found = set()
+        total_tokens = 0
+        
+        # Batch processing
+        batch_size = 64
+        # Create sentences list
+        all_sentences = [Sentence(t) for t in texts if len(t.strip()) > 0]
+        
+        # Predict in chunks to avoid OOM
+        for i in range(0, len(all_sentences), batch_size):
+            batch = all_sentences[i:i+batch_size]
+            self.ner_tagger.predict(batch, verbose=False)
+            
+            for sentence in batch:
+                # Count tokens exactly as original (using SpaCy tokenizer logic roughly)
+                # Or use simple split to match your generic count
+                total_tokens += len([t for t in sentence if not t.text.isspace()])
+
+                for entity in sentence.get_spans('ner'):
+                    txt = entity.text
+                    
+                    # --- EXACT ORIGINAL FILTERS ---
+                    if len(txt) < 2 or len(txt) > 50: continue
+                    if txt.isdigit() or not any(c.isalnum() for c in txt): continue
+                    
+                    # URL/Email check
+                    if 'http' in txt.lower() or '@' in txt or '.' in txt.split()[-1]: continue
+                    
+                    # Incomplete words check (e.g. "Company-")
+                    if any(w.endswith('-') or w.endswith('&') for w in txt.split()): continue
+                    
+                    # Uppercase check (ignore labels like "DATE")
+                    if txt.isupper() and len(txt) > 1: continue
+
+                    label = entity.tag
+                    if label.startswith('B-') or label.startswith('I-'):
+                        label = label[2:]
+
+                    if label in {'PER', 'ORG', 'LOC', 'MISC'}:
+                        entities_found.add(txt)
+
+        density = len(entities_found) / total_tokens if total_tokens > 0 else 0
+        return {'entities': entities_found, 'total_count': len(entities_found), 'density': density}
+
+    # =========================================================================
+    # 2. Nominal Mentions (SpaCy)
+    # =========================================================================
+    def _analyze_nominals(self, syn_texts: List[str]) -> Dict:
+        syn_stats = self._process_nominals(syn_texts, desc="Syn Nominals")
+        
+        common = syn_stats['nominals'].intersection(self.orig_nominal_stats['nominals'])
+        overlap_pct = (len(common) / len(self.orig_nominal_stats['nominals']) * 100) if self.orig_nominal_stats['nominals'] else 0
+
+        return {
+            'synthetic': {
+                'total_nominals': syn_stats['total_count'],
+                'avg_nominal_density': syn_stats['density'],
+                'risk_level': 'high' if syn_stats['density'] > 0.15 else 'low'
+            },
+            'original': {
+                'total_nominals': self.orig_nominal_stats['total_count'],
+                'avg_nominal_density': self.orig_nominal_stats['density'],
+                'risk_level': 'high' if self.orig_nominal_stats['density'] > 0.15 else 'low'
+            },
+            'overlap': {
+                'overlap_percentage': overlap_pct,
+                'risk_level': 'high' if overlap_pct > 50 else 'low'
+            }
+        }
+
+    def _process_nominals(self, texts: List[str], desc="Nominals") -> Dict:
+        nominals_found = set()
+        total_tokens = 0
+        
+        # Using nlp.pipe is faster (batching)
+        # Note: We need 'parser' and 'tagger' enabled for dep_ and pos_
+        for doc in self.nlp.pipe(texts, batch_size=100):
+            
+            # Count valid tokens (exclude punct/space)
+            doc_tokens = [t for t in doc if not t.is_punct and not t.is_space]
+            total_tokens += len(doc_tokens)
+            
+            for token in doc:
+                text_lower = token.text.lower()
+                
+                # 1. Basic Filters
+                if len(token.text) < 2 or len(token.text) > 30: continue
+                if token.text.isdigit() or not any(c.isalnum() for c in token.text): continue
+                if text_lower in self.stop_words or text_lower in self.skip_words: continue
+                
+                # 2. POS Check
+                if token.pos_ not in {'NOUN', 'PROPN'}: continue
+                
+                # 3. Common Noun Filters
+                if token.pos_ == 'NOUN':
+                    if len(token.text) < 3 and not token.text[0].isupper(): continue
+                    if token.lemma_ in {'be', 'have', 'do', 'get', 'make', 'take', 'go', 'come'}: continue
+                
+                # 4. Single Letter Filter
+                if token.pos_ == 'PROPN' and (len(token.text) <= 1 or token.text.isdigit()): continue
+                
+                # 5. Logic Match
+                is_nominal = False
+                
+                # Match 1: Proper Noun
+                if token.pos_ == 'PROPN':
+                    is_nominal = True
+                # Match 2: Subject Position
+                elif token.dep_ in {'nsubj', 'nsubjpass'}:
+                    is_nominal = True
+                # Match 3: Pattern Match (Role/Family/etc)
+                elif token.pos_ == 'NOUN' and text_lower in self.all_nominal_patterns:
+                    is_nominal = True
+                    
+                if is_nominal:
+                    nominals_found.add(token.text)
+                    
+        density = len(nominals_found) / total_tokens if total_tokens > 0 else 0
+        return {'nominals': nominals_found, 'total_count': len(nominals_found), 'density': density}
+
+    # =========================================================================
+    # 3. Stylistic Outliers (Word2Vec)
+    # =========================================================================
+    def _calc_original_outliers(self):
+        """Train W2V on original data and find outliers once"""
+        return self._run_outlier_logic(self.original_texts)
+
+    def _analyze_outliers(self, syn_texts: List[str]) -> Dict:
+        syn_stats = self._run_outlier_logic(syn_texts)
+        orig_stats = self.orig_outlier_stats
+        
+        orig_count = len(orig_stats['outliers'])
+        syn_count = len(syn_stats['outliers'])
+        syn_len = len(syn_texts)
+        orig_len = len(self.original_texts)
+
+        return {
+            'synthetic': {
+                'num_outliers': syn_count,
+                'outlier_percentage': (syn_count / syn_len * 100) if syn_len else 0,
+                'risk_level': 'high' if (syn_count / syn_len) > 0.1 else 'low'
+            },
+            'original': {
+                'num_outliers': orig_count,
+                'outlier_percentage': (orig_count / orig_len * 100) if orig_len else 0,
+                'risk_level': 'high' if (orig_count / orig_len) > 0.1 else 'low'
+            },
+            'comparison': {
+                'outlier_ratio': (syn_count / orig_count) if orig_count > 0 else float('inf'),
+                'risk_level': 'high' if abs((syn_count/syn_len) - (orig_count/orig_len)) > 0.1 else 'low'
+            }
+        }
+
+    def _run_outlier_logic(self, texts: List[str]) -> Dict:
+        # Tokenize
+        tokenized = [
+            [w for w in word_tokenize(t.lower()) if w not in self.stop_words]
+            for t in texts
+        ]
+        
+        # Train W2V
+        model = Word2Vec(sentences=tokenized, vector_size=100, window=5, min_count=1, workers=1)
+        
+        # Embeddings
+        embeddings = []
+        for tokens in tokenized:
+            if tokens:
+                vecs = [model.wv[w] for w in tokens if w in model.wv]
+                embeddings.append(np.mean(vecs, axis=0) if vecs else np.zeros(100))
+            else:
+                embeddings.append(np.zeros(100))
+        
+        embeddings = np.array(embeddings)
+        
+        # Outlier Detection
+        dists = cosine_distances(embeddings)
+        mean_dists = np.mean(dists, axis=1)
+        global_mean = np.mean(mean_dists)
+        global_std = np.std(mean_dists)
+        
+        outliers = []
+        if global_std > 0:
+            scores = (mean_dists - global_mean) / global_std
+            for text, score in zip(texts, scores):
+                if score > 2.0:
+                    outliers.append(text)
+        
+        return {'outliers': set(outliers)}
+
+    def _get_text_column(self):
+        # Helper to find text column from metadata
+        if 'text_columns' in self.metadata and self.metadata['text_columns']:
+            return self.metadata['text_columns'][0]
+        # Fallback: Find first object column
+        for col in self.original_data.columns:
+            if self.original_data[col].dtype == 'object':
+                return col
+        return None
