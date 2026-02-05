@@ -347,11 +347,53 @@ class UtilityEvaluator:
             # Handle non-text columns if any
             other_columns = [col for col in self.input_columns if col not in text_columns]
             if other_columns:
-                # Fill NaN values with 0 for numerical columns
-                X_train_real_other = train_data[other_columns].fillna(0).values
-                X_train_syn_other = self.synthetic_data[other_columns].fillna(0).values
-                X_test_other = test_data[other_columns].fillna(0).values
+                """ ADDITION OF TEXT CATEGORICAL ENCODING INSIDE UTILITY (could be a requirement to do yourself before dataset but why not)"""
+                # 1. Create copies to work on
+                X_train_real_other = train_data[other_columns].copy()
+                X_train_syn_other = self.synthetic_data[other_columns].copy()
                 
+                # Handle test data safely
+                if not test_data.empty:
+                    X_test_other = test_data[other_columns].copy()
+                else:
+                    # Create empty DF with correct columns to prevent errors in loop
+                    X_test_other = pd.DataFrame(columns=other_columns)
+
+                # 2. APPLY YOUR LABEL ENCODING LOGIC HERE
+                from sklearn.preprocessing import LabelEncoder
+                
+                for col in other_columns:
+                    # Check if the column is NOT numeric (i.e. it is categorical text like "Low", "High")
+                    if self.metadata["columns"][col]["sdtype"] == "categorical":
+                        
+                        # Initialize the same encoder you used for the target
+                        le = LabelEncoder()
+                        
+                        # Convert column to string to ensure clean encoding (handles mixed types)
+                        # We combine all data to 'fit' so the encoder knows every possible category
+                        train_vals = X_train_real_other[col].astype(str)
+                        syn_vals = X_train_syn_other[col].astype(str)
+                        test_vals = X_test_other[col].astype(str) if not X_test_other.empty else pd.Series()
+                        
+                        # Learn the categories
+                        all_vals = pd.concat([train_vals, syn_vals, test_vals]).unique()
+                        le.fit(all_vals)
+                        
+                        # Transform (Text -> Numbers)
+                        X_train_real_other[col] = le.transform(train_vals)
+                        X_train_syn_other[col] = le.transform(syn_vals)
+                        
+                        if not X_test_other.empty:
+                            X_test_other[col] = le.transform(test_vals)
+
+                # 3. Now everything is numeric, so we can fill NaNs with 0
+                X_train_real_other = X_train_real_other.fillna(0).values
+                X_train_syn_other = X_train_syn_other.fillna(0).values
+                if not X_test_other.empty:
+                    X_test_other = X_test_other.fillna(0).values
+                else:
+                    X_test_other = np.array([]) # Empty array if no test data
+
                 # Convert to GPU tensors if available
                 if DEVICE == 'cuda':
                     import torch

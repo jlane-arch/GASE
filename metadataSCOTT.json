@@ -1,0 +1,177 @@
+{
+  "columns": {
+    "age": {
+      "sdtype": "numerical",
+      "ntype": "uint",
+      "pii": false
+    },
+    "workclass": {
+      "sdtype": "categorical",
+      "values": [
+        "Private",
+        "State-gov",
+        "Self-emp-not-inc",
+        "Federal-gov",
+        "Local-gov",
+        "Self-emp-inc"
+      ]
+    },
+    "user_id": {
+      "sdtype": "numerical",
+      "ntype": "uint",
+      "pii": false
+    },
+    "education": {
+      "sdtype": "categorical",
+      "values": [
+        "Doctorate",
+        "12th",
+        "Bachelors",
+        "7th-8th",
+        "Some-college",
+        "HS-grad",
+        "9th",
+        "10th",
+        "11th",
+        "Masters",
+        "Preschool",
+        "5th-6th",
+        "Prof-school",
+        "Assoc-voc",
+        "Assoc-acdm",
+        "1st-4th"
+      ]
+    },
+    "educational-num": {
+      "sdtype": "numerical",
+      "ntype": "uint",
+      "pii": false
+    },
+    "marital-status": {
+      "sdtype": "categorical",
+      "values": [
+        "Divorced",
+        "Never-married",
+        "Married-civ-spouse",
+        "Widowed",
+        "Separated",
+        "Married-spouse-absent"
+      ]
+    },
+    "occupation": {
+      "sdtype": "categorical",
+      "values": [
+        "Exec-managerial",
+        "Other-service",
+        "Transport-moving",
+        "Adm-clerical",
+        "Machine-op-inspct",
+        "Sales",
+        "Handlers-cleaners",
+        "Farming-fishing",
+        "Protective-serv",
+        "Prof-specialty",
+        "Craft-repair",
+        "Tech-support",
+        "Priv-house-serv"
+      ]
+    },
+    "relationship": {
+      "sdtype": "categorical",
+      "values": [
+        "Not-in-family",
+        "Own-child",
+        "Husband",
+        "Wife",
+        "Unmarried",
+        "Other-relative"
+      ]
+    },
+    "race": {
+      "sdtype": "categorical",
+      "values": [
+        "White",
+        "Black",
+        "Asian-Pac-Islander",
+        "Other"
+      ]
+    },
+    "gender": {
+      "sdtype": "categorical",
+      "values": [
+        "Male",
+        "Female"
+      ]
+    },
+    "capital-gain": {
+      "sdtype": "numerical",
+      "ntype": "uint",
+      "pii": false
+    },
+    "capital-loss": {
+      "sdtype": "numerical",
+      "ntype": "uint",
+      "pii": false
+    },
+    "hours-per-week": {
+      "sdtype": "numerical",
+      "ntype": "uint",
+      "pii": false
+    },
+    "native-country": {
+      "sdtype": "categorical",
+      "values": [
+        "United-States",
+        "Japan",
+        "South",
+        "Portugal",
+        "Italy",
+        "Mexico",
+        "Ecuador",
+        "England",
+        "Philippines",
+        "China",
+        "Germany",
+        "Dominican-Republic",
+        "Jamaica",
+        "Vietnam",
+        "Thailand",
+        "Puerto-Rico",
+        "Cuba",
+        "El-Salvador",
+        "India",
+        "Yugoslavia",
+        "Cambodia",
+        "Iran"
+      ]
+    },
+    "income_>50K": {
+      "sdtype": "categorical",
+      "values": [
+        0,
+        1
+      ]
+    }
+  },
+  "utility": {
+    "input_columns": [
+      "age",
+      "workclass",
+      "education",
+      "educational-num",
+      "marital-status",
+      "occupation",
+      "relationship",
+      "race",
+      "gender",
+      "capital-gain",
+      "capital-loss",
+      "hours-per-week",
+      "native-country"
+    ],
+    "output_columns": [
+      "income_>50K"
+    ],
+    "task_type": "regression"
+  }
+}

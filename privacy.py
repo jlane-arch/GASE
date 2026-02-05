@@ -172,7 +172,7 @@ def ensure_tensor_device(tensor, device):
     return tensor
 
 class PrivacyEvaluator:
-    def __init__(self, synthetic_data: pd.DataFrame, original_data: pd.DataFrame, metadata: Dict, skip_heavy_models: bool = False):
+    def __init__(self, synthetic_data: pd.DataFrame, original_data: pd.DataFrame, metadata: Dict, skip_heavy_models: bool = False, visualize: bool = False):
         """
         Initialize the privacy evaluator.
         
@@ -186,6 +186,7 @@ class PrivacyEvaluator:
         self.metadata = metadata
         self.logger = logging.getLogger(__name__)
         self.skip_heavy_models = skip_heavy_models
+        self.visualize = visualize
         
         # Initialize smart cache
         self.cache = SmartCache('./cache')
@@ -815,67 +816,68 @@ class PrivacyEvaluator:
 
     def _generate_privacy_visualizations(self, results: Dict):
         """Generate visualizations for privacy evaluation results."""
-        try:
-            # Create output directory if it doesn't exist
-            os.makedirs('privacy_visualizations', exist_ok=True)
-            
-            # 1. Inference Risk Bar Plot
-            if 'inference' in results and results['inference']:
-                plt.figure(figsize=(12, 6))
-                risks = [r.get('risk', 0) for r in results['inference'] if 'risk' in r]
-                columns = [r['secret_column'] for r in results['inference'] if 'risk' in r]
+        if self.visualize:
+            try:
+                # Create output directory if it doesn't exist
+                os.makedirs('privacy_visualizations', exist_ok=True)
                 
-                if risks and columns:  # Only plot if we have valid data
-                    plt.bar(x=columns, height=risks, alpha=0.5, ecolor='black', capsize=10)
-                    plt.xticks(rotation=45, ha='right')
-                    plt.ylabel("Measured inference risk")
-                    plt.xlabel("Secret column")
-                    plt.title("Inference Risk by Column")
-                    plt.tight_layout()
-                    plt.savefig('privacy_visualizations/inference_risk.png')
+                # 1. Inference Risk Bar Plot
+                if 'inference' in results and results['inference']:
+                    plt.figure(figsize=(12, 6))
+                    risks = [r.get('risk', 0) for r in results['inference'] if 'risk' in r]
+                    columns = [r['secret_column'] for r in results['inference'] if 'risk' in r]
+                    
+                    if risks and columns:  # Only plot if we have valid data
+                        plt.bar(x=columns, height=risks, alpha=0.5, ecolor='black', capsize=10)
+                        plt.xticks(rotation=45, ha='right')
+                        plt.ylabel("Measured inference risk")
+                        plt.xlabel("Secret column")
+                        plt.title("Inference Risk by Column")
+                        plt.tight_layout()
+                        plt.savefig('privacy_visualizations/inference_risk.png')
+                    plt.close()
+                
+                # 2. Attack Success Rates Comparison
+                plt.figure(figsize=(10, 6))
+                attack_types = ['Singling Out (Uni)', 'Singling Out (Multi)', 'Linkability']
+                attack_rates = [
+                    results.get('singling_out_univariate', {}).get('attack_rate', 0),
+                    results.get('singling_out_multivariate', {}).get('attack_rate', 0),
+                    results.get('linkability', {}).get('attack_rate', 0)
+                ]
+                
+                plt.bar(x=attack_types, height=attack_rates, alpha=0.5)
+                plt.ylabel("Attack Success Rate")
+                plt.title("Attack Success Rates Comparison")
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                plt.savefig('privacy_visualizations/attack_success_rates.png')
                 plt.close()
-            
-            # 2. Attack Success Rates Comparison
-            plt.figure(figsize=(10, 6))
-            attack_types = ['Singling Out (Uni)', 'Singling Out (Multi)', 'Linkability']
-            attack_rates = [
-                results.get('singling_out_univariate', {}).get('attack_rate', 0),
-                results.get('singling_out_multivariate', {}).get('attack_rate', 0),
-                results.get('linkability', {}).get('attack_rate', 0)
-            ]
-            
-            plt.bar(x=attack_types, height=attack_rates, alpha=0.5)
-            plt.ylabel("Attack Success Rate")
-            plt.title("Attack Success Rates Comparison")
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-            plt.savefig('privacy_visualizations/attack_success_rates.png')
-            plt.close()
-            
-            # 3. Risk Scores Heatmap
-            risk_scores = {
-                'Singling Out (Uni)': results.get('singling_out_univariate', {}).get('risk', 0),
-                'Singling Out (Multi)': results.get('singling_out_multivariate', {}).get('risk', 0),
-                'Linkability': results.get('linkability', {}).get('risk', 0),
-                'Overall': results.get('overall_risk', {}).get('risk_score', 0)
-            }
-            
-            plt.figure(figsize=(8, 4))
-            sns.heatmap(
-                pd.DataFrame([risk_scores]).T,
-                annot=True,
-                cmap='RdYlGn_r',
-                vmin=0,
-                vmax=1,
-                cbar_kws={'label': 'Risk Score'}
-            )
-            plt.title("Privacy Risk Scores")
-            plt.tight_layout()
-            plt.savefig('privacy_visualizations/risk_scores_heatmap.png')
-            plt.close()
-            
-        except Exception as e:
-            self.logger.error(f"Error generating privacy visualizations: {str(e)}")
+                
+                # 3. Risk Scores Heatmap
+                risk_scores = {
+                    'Singling Out (Uni)': results.get('singling_out_univariate', {}).get('risk', 0),
+                    'Singling Out (Multi)': results.get('singling_out_multivariate', {}).get('risk', 0),
+                    'Linkability': results.get('linkability', {}).get('risk', 0),
+                    'Overall': results.get('overall_risk', {}).get('risk_score', 0)
+                }
+                
+                plt.figure(figsize=(8, 4))
+                sns.heatmap(
+                    pd.DataFrame([risk_scores]).T,
+                    annot=True,
+                    cmap='RdYlGn_r',
+                    vmin=0,
+                    vmax=1,
+                    cbar_kws={'label': 'Risk Score'}
+                )
+                plt.title("Privacy Risk Scores")
+                plt.tight_layout()
+                plt.savefig('privacy_visualizations/risk_scores_heatmap.png')
+                plt.close()
+                
+            except Exception as e:
+                self.logger.error(f"Error generating privacy visualizations: {str(e)}")
 
     def _process_entities_batch(self, texts: List[str]) -> List[Tuple]:
         """
@@ -1336,7 +1338,7 @@ class SequentialTextEvaluator:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Flair
-        self.ner_tagger = SequenceTagger.load('flair/ner-english-fast').to(self.device)
+        self.ner_tagger = SequenceTagger.load('flair/ner-english-large').to(self.device)
         
         # SpaCy
         try:
